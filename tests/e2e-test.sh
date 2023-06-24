@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 #
 # Copyright 2021 The Sigstore Authors.
 #
@@ -22,6 +22,9 @@ rm -f /tmp/rekor-*.cov
 echo "installing gocovmerge"
 make gocovmerge
 
+echo "building test-only containers"
+docker build -t gcp-pubsub-emulator -f Dockerfile.pubsub-emulator .
+
 echo "starting services"
 docker-compose -f docker-compose.yml -f docker-compose.test.yml up -d --build
 
@@ -31,15 +34,17 @@ go test -c ./cmd/rekor-server -o rekor-server -covermode=count -coverpkg=./...
 
 count=0
 
-echo -n "waiting up to 60 sec for system to start"
-until [ $(docker-compose ps | grep -c "(healthy)") == 3 ];
+echo -n "waiting up to 5 min for system to start"
+until [ $(docker-compose ps | \
+   grep -E "(rekor-mysql|rekor-redis|rekor-server|rekor-gcp-pubsub)" | \
+   grep -c "(healthy)" ) == 4 ];
 do
-    if [ $count -eq 6 ]; then
+    if [ $count -eq 60 ]; then
        echo "! timeout reached"
        exit 1
     else
        echo -n "."
-       sleep 10
+       sleep 5
        let 'count+=1'
     fi
 done
@@ -53,7 +58,7 @@ if ! REKORTMPDIR=$REKORTMPDIR go test -tags=e2e ./tests/ -run TestIssue1308; the
    docker-compose logs --no-color > /tmp/docker-compose.log
    exit 1
 fi
-if ! REKORTMPDIR=$REKORTMPDIR go test -tags=e2e ./tests/; then 
+if ! REKORTMPDIR=$REKORTMPDIR PUBSUB_EMULATOR_HOST=localhost:8085 go test -tags=e2e ./tests/; then 
    docker-compose logs --no-color > /tmp/docker-compose.log
    exit 1
 fi
@@ -67,7 +72,13 @@ fi
 echo "generating code coverage"
 docker-compose restart rekor-server
 
-if ! docker cp $(docker ps -aqf "name=rekor_rekor-server"):go/rekor-server.cov /tmp/rekor-server.cov ; then
+# docker-compose appears to name the containers slightly differently in GHA CI vs locally on macOS
+container_name="rekor_rekor-server"
+if [[ "$(uname -s)" -eq "Darwin" ]]; then
+   container_name="rekor-rekor-server"
+fi
+
+if ! docker cp $(docker ps -aqf "name=${container_name}"):/go/rekor-server.cov /tmp/rekor-server.cov ; then
    # failed to copy code coverage report from server
    echo "Failed to retrieve server code coverage report"
    docker-compose logs --no-color > /tmp/docker-compose.log
